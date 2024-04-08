@@ -1,3 +1,10 @@
+pipeline {
+    agent any
+    stages{
+        stage('init'){
+            script{
+
+
 def setProperties(){
     // def orgList = ["SIE", "SIE-PRIVATE"]
     def domainList = ["", "coreexperience", "dataplatform", "gaminglife", "monetization", "partnersplatform", "pci", "platformfundamentals", "psdirect"]
@@ -186,7 +193,10 @@ def setProperties(){
     ])
 }
 
-
+            }
+        }
+    }
+}
 
 // // def parametersContent = readFile('/path/to/parameters.yaml')
 
