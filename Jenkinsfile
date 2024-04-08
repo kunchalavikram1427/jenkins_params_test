@@ -1,7 +1,6 @@
-def parametersContent = readFile('/path/to/parameters.yaml')
+// def parametersContent = readFile('/path/to/parameters.yaml')
 
-// Alternatively, if you prefer shell commands:
-// def parametersContent = sh(script: 'cat /path/to/parameters.yaml', returnStdout: true).trim()
+def parametersContent = sh(script: 'cat /path/to/parameters.yaml', returnStdout: true).trim()
 
 def parametersConfig = evaluate(parametersContent)
 
