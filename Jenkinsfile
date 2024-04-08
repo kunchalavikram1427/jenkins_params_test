@@ -6,11 +6,15 @@ pipeline {
             steps {
                 script {
                     def params = load 'parameters.groovy'
-                    // Access parameters as needed
+                }
+            }
+        }
+        stage('Read Parameters') {
+            steps {
+                script {
                     echo "Parameter: ${params.ENVIRONMENT_LINE}"
                 }
             }
         }
-        // Add more stages as needed
     }
 }
