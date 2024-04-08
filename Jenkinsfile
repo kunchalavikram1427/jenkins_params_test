@@ -7,7 +7,7 @@ pipeline {
                 script {
                     def params = load 'parameters.groovy'
                     // Access parameters as needed
-                    echo "Parameter: ${params.LINE}"
+                    echo "Parameter: ${params.ENVIRONMENT_LINE}"
                 }
             }
         }
