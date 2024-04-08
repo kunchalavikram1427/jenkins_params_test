@@ -1,9 +1,224 @@
-pipeline {
-    agent any
-    stages{
-        stage('init'){
-            script{
+import com.sony.sie.cicd.helpers.utilities.JenkinsUtils
+import com.sony.sie.cicd.helpers.utilities.GitUtils
+import com.sony.sie.cicd.helpers.utilities.ServiceNow
+import com.sony.sie.cicd.helpers.utilities.SlackNotifications
+import org.codehaus.groovy.GroovyException
 
+def call(def infrastructure = "navigator-cloud") {
+    jenkinsUtils = new JenkinsUtils()
+    serviceNow = new ServiceNow()
+    notifications = new SlackNotifications()
+    ansiColor('xterm') {
+        try {
+            timestamps {
+                setProperties()
+                process infrastructure
+            }
+        } catch (GroovyException err) {
+            if (!jenkinsUtils.isBuildAborted()) {
+                String msg = err.getMessage()
+                if (!msg) msg = 'Unknown error!'
+                ansi_echo msg, 31
+                currentBuild.result = "FAILURE"
+            }
+        }
+    }
+}
+
+def process(def infrastructure) {
+    def conf = [
+        domainName:             params.PSN_DOMAIN,
+        infrastructure:         params.INFRASTRUCTURE,
+        workload:               params.WORKLOAD,
+        repoName:               jenkinsUtils.removeWhiteSpaces(params.REPO_NAME),
+        repoBranch:             jenkinsUtils.removeWhiteSpaces(params.REPO_BRANCH),
+        helmChartPath:          jenkinsUtils.removeWhiteSpaces(params.HELM_CHART_PATH),
+        orgName:                params.ORG_NAME,
+        namespacePrefix:        jenkinsUtils.removeWhiteSpaces(params.NAMESPACE_PREFIX),
+        deployFromGithub:       params.DEPLOY_FROM_GITHUB,
+        aloyGroupsToView:       jenkinsUtils.removeWhiteSpaces(params.ALOY_GROUPS_TO_VIEW),
+        aloyGroupsForNonprod:   jenkinsUtils.removeWhiteSpaces(params.ALOY_GROUPS_TO_DEPLOY_NONPROD),
+        aloyGroupsForProd:      jenkinsUtils.removeWhiteSpaces(params.ALOY_GROUPS_TO_DEPLOY_PROD),
+        deployEnvs:             jenkinsUtils.removeWhiteSpaces(params.DEPLOY_ENVS),
+        slackChannels:          jenkinsUtils.removeWhiteSpaces(params.SLACK_CHANNELS),
+        helmReleaseName:        jenkinsUtils.removeWhiteSpaces(params.HELM_RELEASE_NAME),
+        // postDeploymentTest:     params.POST_DEPLOYMENT_TEST,
+        // raaTeamName:            jenkinsUtils.removeWhiteSpaces(params.RAA_TEAM_NAME),
+        // raaAppName:             jenkinsUtils.removeWhiteSpaces(params.RAA_APP_NAME),
+        raaEnabled:             params.RAA_ENABLED,
+        helmChartName:          jenkinsUtils.removeWhiteSpaces(params.CHART_NAME),
+        serviceNowConfig:       jenkinsUtils.removeWhiteSpaces(params.SERVICENOW_NAMES),
+        serviceNowLegacyPillar: jenkinsUtils.removeWhiteSpaces(params.SERVICENOW_LEGACY_PILLAR),
+        serviceDescription:     jenkinsUtils.removeWhiteSpaces(params.SERVICE_DESCRIPTION),
+        primaryContact:         jenkinsUtils.removeWhiteSpaces(params.PRIMARY_CONTACT),
+        secondaryContact:       jenkinsUtils.removeWhiteSpaces(params.SECONDARY_CONTACT),
+        xmattersGroup:          jenkinsUtils.removeWhiteSpaces(params.XMATTERS_GROUP),
+        serviceCriticality:     jenkinsUtils.removeWhiteSpaces(params.SERVICE_CRITICALITY)
+    ]
+    if(params.AUTO_CD_DEPLOY_UPTO != "" && params.AUTO_CD_DEPLOY_UPTO != "NOT APPLICABLE") {
+        conf.autoCDTrigger = true
+        conf.autoDeployTo = params.AUTO_CD_DEPLOY_UPTO
+    }
+    
+    stage("Input Validation") {
+        echo "Starting Jenkins Job..."
+        echo "${conf}"
+        setProperties()
+        if (conf.domainName == "") throw new GroovyException("The Jenkins domain name was not selected, please select.")
+        if (conf.infrastructure == "") throw new GroovyException("The infrastructure name was not selected, please select.")
+        if (conf.repoName == "") throw new GroovyException("The repo name was not provided, please input.")
+        if (conf.repoBranch == "") throw new GroovyException("The repo branch was not provided, please input.")
+        if (conf.helmChartPath == "") throw new GroovyException("The helm chart path was not provided, please input.")
+        if (conf.namespacePrefix == "") throw new GroovyException("The namespace prefix was not provided, please input.")
+        if (conf.aloyGroupsForNonprod == "") throw new GroovyException("The aloy groups for nonprod deployment was not provided, please input.")
+        if (conf.aloyGroupsForProd == "") throw new GroovyException("The aloy groups for prod deployment was not provided, please input.")
+        if (conf.deployEnvs == "") throw new GroovyException("The deployment line + envs was not selected, please select.")
+        if (conf.primaryContact == "") throw new GroovyException("Please enter primary contact for this service.")
+        if (conf.serviceDescription == "") throw new GroovyException("Please enter the description, purpose, or function of this service.")
+        if (conf.serviceCriticality == "") throw new GroovyException("Please enter the service criticality level.")
+        if (conf.xmattersGroup == "") throw new GroovyException("Please enter the Xmatters Group, used to contact group in case of emergency.")
+        
+        currentBuild.description = "${conf.repoName}"
+    }
+    env.HELM_CHART_PATH = conf.helmChartPath
+    if(conf.helmChartName == "") conf.helmChartName = conf.repoName
+
+    jenkinsUtils.jenkinsNode([infrastructure: infrastructure, templateType: "checkout"]) {
+        dir(conf.repoName) {
+            container("build-tools"){
+                try {
+                    stage("Check ServiceNow CI Onboard") {
+                        echo "Check ServiceNow CI Requirements"
+                        serviceNow.checkPsnAppSysId(conf)
+                    }
+                } catch (Exception err) {
+                    currentBuild.result = "UNSTABLE"
+                    echo "Checking ServiceNow CI Requirements failed: ${err.getMessage()}"
+                    waitForOverride()
+                }
+                stage("Create Onboard PR") {
+                    echo "Create Onboard PR"
+                    createOnboardPR conf
+                }
+            }
+        }
+    }
+}
+
+def waitForOverride() {
+    //Display a gate until user overrides / cancels, or timeout is reached
+    timeout(60) {
+        String waitingForOverride = "Checking for the ServiceNow CI requirements failed. You will not be able to deploy with traffic enabled to UKS without ServiceNow CI created.\n\n" +
+            "[Override] Click \"Override\" to bypass this checking and creating an onboarding PR.\n" +
+            "[Abort]: Cancel this onboarding job"
+        input id: 'userOverride', ok: "Override", message: waitingForOverride
+    }
+}
+
+def createOnboardPR(def conf) {
+    cleanWs()
+    String configRepoName = "engine-cd-configurations"
+    jenkinsUtils.checkoutGitSCM(configRepoName, "master", "SIE")
+    def confMap = [
+        name: conf.helmChartName,
+        kind: "eks",
+        serviceType: "standard",
+        github: "${conf.orgName}/${conf.repoName}",
+        infrastructure: conf.infrastructure,
+        namespacePrefix: conf.namespacePrefix,
+        helmChartPath: conf.helmChartPath,
+        deployFromGithub: conf.deployFromGithub
+    ]
+    //workload
+    if(conf.workload != "") confMap.workload = conf.workload
+    //helm Release Name
+    if(conf.helmReleaseName != "") confMap.helmReleaseName = conf.helmReleaseName
+    //slack channels
+    if(conf.slackChannels != "") {
+        confMap.slackChannels = []
+        def slackChannels = conf.slackChannels.split(",")
+        for(def channel in slackChannels) {
+            confMap.slackChannels.add([name:channel])
+        }
+    }
+    //permission
+    confMap.permission = [deploy: [nonprod: [], prod: []]]
+    //permission: browse
+    if (conf.aloyGroupsToView != "") {
+        confMap.permission.browse = []
+        def aloyGroups = conf.aloyGroupsToView.split(",")
+        for(def group in aloyGroups) {
+            confMap.permission.browse.add(group)
+        }
+    }
+    //permission: nonprod
+    def aloyGroups = conf.aloyGroupsForNonprod.split(",")
+    for(def group in aloyGroups) {
+        confMap.permission.deploy.nonprod.add(group)
+    }
+    //permission: prod
+    aloyGroups = conf.aloyGroupsForProd.split(",")
+    for(group in aloyGroups) {
+        confMap.permission.deploy.prod.add(group)
+    }
+    //artifactory -- if not deploy from github, artifactory setting is required
+    if(!conf.deployFromGithub) confMap.artifactory = [artifactId: conf.helmChartName]
+    //auto cd trigger
+    if(conf.autoCDTrigger) {
+        confMap.autoCDtrigger = [enable: true, deployUpto: conf.autoDeployTo]
+    }
+    //RAA ready for scan for laco repo
+    if(conf.infrastructure == "laco-cloud") {
+        confMap.raaEnabled = conf.raaEnabled
+    }
+    //post deployment test
+    // if(conf.postDeploymentTest == "Enable post deployment test") {
+    //     def testJobUrl = jenkinsUtils.removeWhiteSpaces(params.AJAX_INTEGRATION_TEST_JOB_URL)
+    //     if (testJobUrl == "") throw new GroovyException("The ajax integration test job url is not provided, please input.")
+    //     confMap.postDeploymentAjaxIntegrationTest = [
+    //         enabled: true,
+    //         rollbackDeployment: false,
+    //         projectDir: params.PROJECT_DIR == "" ? "./" : params.PROJECT_DIR,
+    //         remoteJobUrl: testJobUrl
+    //     ]
+    // }
+
+    // if(conf.raaTeamName) confMap.raaTeamName = conf.raaTeamName
+    // if(conf.raaAppName) confMap.raaAppName = conf.raaAppName
+
+    //serviceNow config names
+    if(conf.serviceNowConfig != "") {
+        confMap.serviceNowConfig = []
+        def configNames = conf.serviceNowConfig.split(",")
+        for(def item in configNames) {
+            if(item.contains(":")) {
+                def arr = item.split(":")
+                confMap.serviceNowConfig.add([serviceName: arr[0], serviceNowCIName: arr[1]])
+            } else {
+                throw new GroovyException("Both the serviceName and serviceNowCIName are required for SERVICENOW_NAMES input and the format is serviceName:serviceNowCIName, please input.")
+            }
+        }
+    }
+    //deployEnvs
+    confMap.deployEnvs = []
+    def deployEnvs = conf.deployEnvs.split(",")
+    for(def psenv in deployEnvs) {
+        confMap.deployEnvs.add([name: psenv])
+    }
+    // echo "${confMap}"
+    def fileName = "${conf.helmChartName}.yaml"
+    def filePath = "${conf.domainName}/cd"
+    dir(filePath) {
+        if(fileExists(fileName)) sh "rm ${fileName}"
+        writeYaml file: fileName, data: confMap
+        // sh "ls -la"
+        sh "cat ${fileName}"
+    }
+    String branchName = "${conf.repoName}-onboarding"
+    String prTitle = "onboarding ${conf.repoName}"
+    String msgBody = "Onboarding ${conf.repoName} to engine cd pipelines on core-jenkins. Make sure to review and test it before merging to master."
+    new GitUtils().createPR(configRepoName, "SIE", branchName, ["${filePath}/${fileName}"], prTitle, msgBody)
+}
 
 def setProperties(){
     // def orgList = ["SIE", "SIE-PRIVATE"]
@@ -115,11 +330,31 @@ def setProperties(){
                 description: 'Required: How would a service outage impact the PlayStation network? - used for Service Now Onboarding , i.e.: Low',
                 name: 'SERVICE_CRITICALITY'
         ),
+        // string(
+        //         defaultValue: '',
+        //         description: "Required: Chart name of the Chart.yaml, i.e. poki-simple",
+        //         name: 'ARTIFACT_ID'
+        // ),
+        // string(
+        //         defaultValue: '',
+        //         description: 'Optional: repository in the engine-helm-virtual artifactory, i.e. engine-helm-virtual/poki-simple',
+        //         name: 'ARTIFACTORY_REPOSITORY'
+        // ),
         string(
                 defaultValue: '',
                 description: 'Optional: Slack team channels [use comma to separate channels], i.e.: poki-simple',
                 name: 'SLACK_CHANNELS'
         ),
+        // string(
+        //         defaultValue: '',
+        //         description: 'Optional: RAA team name. i.e. korra',
+        //         name: 'RAA_TEAM_NAME'
+        // ),
+        // string(
+        //         defaultValue: '',
+        //         description: 'Optional: RAA App Name and its default value is the repo name. i.e. poki-simple',
+        //         name: 'RAA_APP_NAME'
+        // ),
         string(
                 defaultValue: '',
                 description: 'Optional: Pair with serviceName and serviceNowCIName, format: serviceName:serviceNowCIName [use comma to separate config names] . i.e. Haste_Sample:Haste_Sample-psn',
@@ -193,37 +428,7 @@ def setProperties(){
     ])
 }
 
-            }
-        }
-    }
+void ansi_echo(String txt, Integer color = 34) {
+    //color code: black: 30, red: 31, green: 32, yellow: 33, blue: 34, purple: 35
+    echo "\033[01;${color}m ${txt}...\033[00m"
 }
-
-// // def parametersContent = readFile('/path/to/parameters.yaml')
-
-// def parametersContent = sh(script: 'cat /path/to/parameters.yaml', returnStdout: true).trim()
-
-// def parametersConfig = evaluate(parametersContent)
-
-// properties([
-//   buildDiscarder(
-//     logRotator(
-//       artifactDaysToKeepStr: '',
-//       artifactNumToKeepStr: '',
-//       daysToKeepStr: '',
-//       numToKeepStr: '1000'
-//     )
-//   ),
-//   parametersConfig['parameters']
-// ])
-
-// def channel = "#kmj-jenkins-updates"
-
-// currentBuild.description = "CATBUS RESTART: ${INSTANCE}"
-
-// if (env.INSTANCE == "Please select one of the options in LINE") {
-//   print "Please select one of the options in LINE"
-//   currentBuild.result = 'FAILURE'
-// } else {
-//   print "catbusRestart has been initiated!!"
-//   catbusRestart(channel)
-// }
