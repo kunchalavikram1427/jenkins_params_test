@@ -1,13 +1,5 @@
-import com.sony.sie.cicd.helpers.utilities.JenkinsUtils
-import com.sony.sie.cicd.helpers.utilities.GitUtils
-import com.sony.sie.cicd.helpers.utilities.ServiceNow
-import com.sony.sie.cicd.helpers.utilities.SlackNotifications
-import org.codehaus.groovy.GroovyException
 
 def call(def infrastructure = "navigator-cloud") {
-    jenkinsUtils = new JenkinsUtils()
-    serviceNow = new ServiceNow()
-    notifications = new SlackNotifications()
     ansiColor('xterm') {
         try {
             timestamps {
