@@ -19,11 +19,9 @@ def channel = "#kmj-jenkins-updates"
 
 currentBuild.description = "CATBUS RESTART: ${INSTANCE}"
 
-if(env.INSTANCE == "Please select one of the options in LINE"){
-  print "Please select one of the options in LINE"
-  currentBuild.result = 'FAILURE'
+if(env.INSTANCE == "Prod_NP"){
+  print "Hi"
 }
 else{
   print "catbusRestart has been initiated!!"
-  catbusRestart(channel)
 }
