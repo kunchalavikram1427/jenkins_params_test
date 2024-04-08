@@ -1,3 +1,6 @@
+def resources = ["aws-s3-bucket","aws-irsa","asm","aws-dynamodb", "aws-iam-policy"]
+def env_line = ["e1np","mldev","e1pmgt","sandbox"]
+
 properties([
     parameters([
         choice(
