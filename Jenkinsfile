@@ -1,7 +1,9 @@
-def parametersFile = new File('parameters.yaml')
-def parameters = parametersFile.text
+def parametersContent = readFile('/path/to/parameters.yaml')
 
-def parametersConfig = evaluate(parameters)
+// Alternatively, if you prefer shell commands:
+// def parametersContent = sh(script: 'cat /path/to/parameters.yaml', returnStdout: true).trim()
+
+def parametersConfig = evaluate(parametersContent)
 
 properties([
   buildDiscarder(
@@ -19,9 +21,10 @@ def channel = "#kmj-jenkins-updates"
 
 currentBuild.description = "CATBUS RESTART: ${INSTANCE}"
 
-if(env.INSTANCE == "Prod_NP"){
-  print "Hi"
-}
-else{
+if (env.INSTANCE == "Please select one of the options in LINE") {
+  print "Please select one of the options in LINE"
+  currentBuild.result = 'FAILURE'
+} else {
   print "catbusRestart has been initiated!!"
+  catbusRestart(channel)
 }
